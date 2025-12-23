@@ -1,0 +1,27 @@
+# Compiled binaries
+eap_interpreter
+eap_interpreter.exe
+*.o
+*.out
+*.exe
+
+# Build artifacts
+dist/
+artifacts/
+
+# Test files
+test*.eap
+*.tmp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.log

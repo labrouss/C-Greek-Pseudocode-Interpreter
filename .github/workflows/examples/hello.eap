@@ -1,0 +1,4 @@
+ΑΛΓΟΡΙΘΜΟΣ HelloWorld
+ΑΡΧΗ
+    ΤΥΠΩΣΕ("Hello from EAP Interpreter!", EOLN);
+ΤΕΛΟΣ

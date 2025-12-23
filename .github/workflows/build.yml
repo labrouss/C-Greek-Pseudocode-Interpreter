@@ -1,0 +1,160 @@
+name: Build EAP Interpreter
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: eap_interpreter
+            asset_name: eap_interpreter-linux-amd64
+          - os: windows-latest
+            artifact_name: eap_interpreter.exe
+            asset_name: eap_interpreter-windows-amd64.exe
+          - os: macos-latest
+            artifact_name: eap_interpreter
+            asset_name: eap_interpreter-macos-amd64
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up GCC (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc build-essential
+
+    - name: Set up GCC (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install gcc
+
+    - name: Set up MinGW (Windows)
+      if: matrix.os == 'windows-latest'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: mingw-w64-x86_64-gcc
+
+    - name: Build (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        gcc -o ${{ matrix.artifact_name }} interpreter.c -lm -O2
+        chmod +x ${{ matrix.artifact_name }}
+
+    - name: Build (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        gcc -o ${{ matrix.artifact_name }} interpreter.c -lm -O2
+
+    - name: Test interpreter (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        echo 'ΑΛΓΟΡΙΘΜΟΣ test
+        ΑΡΧΗ
+            ΤΥΠΩΣΕ("Hello from EAP!");
+        ΤΕΛΟΣ' > test.eap
+        ./${{ matrix.artifact_name }} test.eap
+
+    - name: Test interpreter (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        echo 'ΑΛΓΟΡΙΘΜΟΣ test
+        ΑΡΧΗ
+            ΤΥΠΩΣΕ("Hello from EAP!");
+        ΤΕΛΟΣ' > test.eap
+        ./${{ matrix.artifact_name }} test.eap
+
+    - name: Create distribution package (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        mkdir -p dist
+        cp ${{ matrix.artifact_name }} dist/
+        cp README.md dist/ 2>/dev/null || true
+        cp LICENSE dist/ 2>/dev/null || true
+        if [ -d examples ]; then
+          cp -r examples dist/
+        fi
+        cd dist
+        tar -czf ../${{ matrix.asset_name }}.tar.gz *
+        cd ..
+
+    - name: Create distribution package (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        mkdir -p dist
+        cp ${{ matrix.artifact_name }} dist/
+        cp README.md dist/ 2>/dev/null || true
+        cp LICENSE dist/ 2>/dev/null || true
+        if [ -d examples ]; then
+          cp -r examples dist/
+        fi
+
+    - name: Zip Windows package
+      if: matrix.os == 'windows-latest'
+      shell: pwsh
+      run: |
+        Compress-Archive -Path dist/* -DestinationPath ${{ matrix.asset_name }}.zip
+
+    - name: Upload artifact (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: ${{ matrix.asset_name }}.tar.gz
+
+    - name: Upload artifact (Windows)
+      if: matrix.os == 'windows-latest'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: ${{ matrix.asset_name }}.zip
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+
+    - name: Display structure of downloaded files
+      run: ls -R artifacts
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        name: Release ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+        generate_release_notes: true
+        files: |
+          artifacts/eap_interpreter-linux-amd64/eap_interpreter-linux-amd64.tar.gz
+          artifacts/eap_interpreter-windows-amd64.exe/eap_interpreter-windows-amd64.exe.zip
+          artifacts/eap_interpreter-macos-amd64/eap_interpreter-macos-amd64.tar.gz

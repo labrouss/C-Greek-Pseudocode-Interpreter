@@ -1,0 +1,122 @@
+name: Test EAP Interpreter
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    name: Run Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up GCC (Ubuntu)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y gcc
+
+    - name: Set up GCC (macOS)
+      if: matrix.os == 'macos-latest'
+      run: |
+        brew install gcc
+
+    - name: Set up MinGW (Windows)
+      if: matrix.os == 'windows-latest'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        install: mingw-w64-x86_64-gcc
+
+    - name: Build (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: gcc -o eap_interpreter interpreter.c -lm -Wall
+
+    - name: Build (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: gcc -o eap_interpreter.exe interpreter.c -lm -Wall
+
+    - name: Create test file
+      shell: bash
+      run: |
+        cat > test_basic.eap << 'EOF'
+        ΑΛΓΟΡΙΘΜΟΣ BasicTest
+        ΔΕΔΟΜΕΝΑ
+            x, y: INTEGER;
+        ΑΡΧΗ
+            x:=5;
+            y:=10;
+            ΤΥΠΩΣΕ("Sum: ", x+y, EOLN);
+        ΤΕΛΟΣ
+        EOF
+
+    - name: Run basic test (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: ./eap_interpreter test_basic.eap
+
+    - name: Run basic test (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: ./eap_interpreter.exe test_basic.eap
+
+    - name: Create array test
+      shell: bash
+      run: |
+        cat > test_array.eap << 'EOF'
+        ΑΛΓΟΡΙΘΜΟΣ ArrayTest
+        ΔΕΔΟΜΕΝΑ
+            arr: ARRAY[1..5] OF INTEGER;
+            i: INTEGER;
+        ΑΡΧΗ
+            ΓΙΑ i:=1 ΕΩΣ 5 ΕΠΑΝΑΛΑΒΕ
+                arr[i]:=i*2;
+            ΓΙΑ-ΤΕΛΟΣ
+            ΓΙΑ i:=1 ΕΩΣ 5 ΕΠΑΝΑΛΑΒΕ
+                ΤΥΠΩΣΕ(arr[i], " ");
+            ΓΙΑ-ΤΕΛΟΣ
+        ΤΕΛΟΣ
+        EOF
+
+    - name: Run array test (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: ./eap_interpreter test_array.eap
+
+    - name: Run array test (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: ./eap_interpreter.exe test_array.eap
+
+    - name: Run example tests (Linux/macOS)
+      if: matrix.os != 'windows-latest'
+      run: |
+        if [ -d examples ]; then
+          for file in examples/*.eap; do
+            if [ -f "$file" ]; then
+              echo "Testing $file..."
+              timeout 5 ./eap_interpreter "$file" < /dev/null || true
+            fi
+          done
+        fi
+
+    - name: Run example tests (Windows)
+      if: matrix.os == 'windows-latest'
+      shell: msys2 {0}
+      run: |
+        if [ -d examples ]; then
+          for file in examples/*.eap; do
+            if [ -f "$file" ]; then
+              echo "Testing $file..."
+              timeout 5 ./eap_interpreter.exe "$file" < /dev/null || true
+            fi
+          done
+        fi
