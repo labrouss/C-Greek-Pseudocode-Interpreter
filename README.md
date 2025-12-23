@@ -23,7 +23,7 @@ A complete interpreter for the **EAP (Ελληνικό Ακαδημαϊκό Ψε
 ### Build
 ```bash
 git clone https://github.com/labrouss/C-Greek-Pseudocode-Interpreter
-cd eap-interpreter
+cd C-Greek-Pseudocode-Interpreter
 gcc -o eap_interpreter interpreter.c -lm
 ```
 
