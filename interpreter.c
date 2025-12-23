@@ -112,6 +112,15 @@ typedef struct {
     ValueType type;
 } RuntimeValue;
 
+
+typedef struct {
+    FILE *output;
+    int indent_level;
+    bool in_function;
+    char *current_function_name;
+    Environment *env;  // For looking up array bounds
+} CodeGenerator;
+
 struct ASTNode {
     ASTNodeType type;
     int line;
@@ -249,6 +258,19 @@ static void execute_statement(ASTNode *stmt, Environment *env);
 static RuntimeValue evaluate(ASTNode *expr, Environment *env);
 static void free_runtime_value(RuntimeValue *val);
 static RuntimeValue copy_runtime_value(RuntimeValue *val);
+
+// Codegen declarations
+// Codegen declarations
+void codegen_init(CodeGenerator *gen, FILE *out);
+void codegen_program(CodeGenerator *gen, ASTNode *prog);
+char* sanitize_identifier(const char *name);      // Ensure this exists
+const char* map_type(const char *eap_type);       // Ensure this exists
+void codegen_declaration(CodeGenerator *gen, ASTNode *decl);
+void codegen_function(CodeGenerator *gen, ASTNode *func);
+void codegen_procedure(CodeGenerator *gen, ASTNode *proc);
+void codegen_statement(CodeGenerator *gen, ASTNode *stmt);
+void codegen_expression(CodeGenerator *gen, ASTNode *expr);
+
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -2786,19 +2808,627 @@ static char *read_file(const char *filename) {
     
     return content;
 }
+// ============================================================================
+// CODE GENERATOR IMPLEMENTATION (Missing Helpers)
+// ============================================================================
+
+char* sanitize_identifier(const char *name) {
+    if (!name) return NULL;
+    static char buffer[MAX_TOKEN_LEN];
+    int j = 0;
+    for (int i = 0; name[i] && j < MAX_TOKEN_LEN - 1; i++) {
+        unsigned char c = (unsigned char)name[i];
+        // C identifiers can only have alphanumeric and underscores
+        // Replace Greek characters or other special characters with underscores 
+        // or a safe mapping. For simplicity, we convert non-standard chars to '_'
+        if (isalnum(c) || c == '_') {
+            buffer[j++] = c;
+        } else {
+            // Check for common Greek characters if you want more readable C code,
+            // otherwise replace with underscore:
+            buffer[j++] = '_';
+        }
+    }
+    buffer[j] = '\0';
+    return buffer;
+}
+const char* map_type(const char *eap_type) {
+    if (!eap_type) return "int";
+
+    // Use a more robust check for Greek characters
+    if (str_equals_ignore_case(eap_type, "ΑΚΕΡΑΙΟΣ") || 
+        str_equals_ignore_case(eap_type, "INTEGER")) {
+        return "int";
+    }
+    if (str_equals_ignore_case(eap_type, "ΠΡΑΓΜΑΤΙΚΟΣ") || 
+        str_equals_ignore_case(eap_type, "REAL")) {
+        return "double";
+    }
+    if (str_equals_ignore_case(eap_type, "ΛΟΓΙΚΟΣ") || 
+        str_equals_ignore_case(eap_type, "BOOLEAN")) {
+        return "bool";
+    }
+    if (str_equals_ignore_case(eap_type, "ΧΑΡΑΚΤΗΡΑΣ") || 
+        str_equals_ignore_case(eap_type, "CHAR")) {
+        return "char";
+    }
+
+    // Default to int instead of void to avoid "void sum;" errors
+    return "int";
+}
+
+
+void codegen_init(CodeGenerator *gen, FILE *out) {
+    gen->output = out;
+    gen->indent_level = 0;
+    gen->in_function = false;
+    gen->current_function_name = NULL;
+}
+
+void codegen_indent(CodeGenerator *gen) {
+    for (int i = 0; i < gen->indent_level; i++) {
+        fprintf(gen->output, "    ");
+    }
+}
+
+void codegen_line(CodeGenerator *gen, const char *fmt, ...) {
+    codegen_indent(gen);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(gen->output, fmt, args);
+    va_end(args);
+    fprintf(gen->output, "\n");
+}
+
+
+void codegen_expression(CodeGenerator *gen, ASTNode *expr) {
+    if (!expr) {
+        fprintf(gen->output, "0");
+        return;
+    }
+    
+    switch (expr->type) {
+      case AST_LITERAL:
+    switch (expr->literal.value.type) {
+        case VAL_INT:
+            fprintf(gen->output, "%d", expr->literal.value.value.int_val);
+            break;
+        case VAL_REAL:
+            fprintf(gen->output, "%g", expr->literal.value.value.real_val);
+            break;
+        case VAL_BOOL:
+            fprintf(gen->output, "%s", expr->literal.value.value.bool_val ? "true" : "false");
+            break;
+        case VAL_STRING:
+            // Handle EOLN marker vs regular string
+            if (strcmp(expr->literal.value.value.str_val, "__EOLN__") == 0 || 
+                strcmp(expr->literal.value.value.str_val, "EOLN") == 0) {
+                // If we are in a printf argument list, use '\n'
+                fprintf(gen->output, "'\\n'");
+            } else {
+                fprintf(gen->output, "\"%s\"", expr->literal.value.value.str_val);
+            }
+            break;
+        default:
+            fprintf(gen->output, "0");
+    }
+    break;
+            
+        case AST_IDENTIFIER:
+            if (str_equals_ignore_case(expr->identifier.name, "EOLN")) {
+                fprintf(gen->output, "'\\n'");
+            } else {
+                fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
+            }
+            break;
+            
+        case AST_BINARY_OP:
+            fprintf(gen->output, "(");
+            codegen_expression(gen, expr->binary.left);
+            
+            // Map operators
+            if (strcmp(expr->binary.operator, "=") == 0) {
+                fprintf(gen->output, " == ");
+            } else if (strcmp(expr->binary.operator, "<>") == 0) {
+                fprintf(gen->output, " != ");
+            } else if (str_equals_ignore_case(expr->binary.operator, "DIV")) {
+                fprintf(gen->output, " / ");
+            } else if (str_equals_ignore_case(expr->binary.operator, "MOD")) {
+                fprintf(gen->output, " %% ");
+            } else if (str_equals_ignore_case(expr->binary.operator, "AND") ||
+                       str_equals_ignore_case(expr->binary.operator, "ΚΑΙ")) {
+                fprintf(gen->output, " && ");
+            } else if (str_equals_ignore_case(expr->binary.operator, "OR") ||
+                       str_equals_ignore_case(expr->binary.operator, "Ή")) {
+                fprintf(gen->output, " || ");
+            } else {
+                fprintf(gen->output, " %s ", expr->binary.operator);
+            }
+            
+            codegen_expression(gen, expr->binary.right);
+            fprintf(gen->output, ")");
+            break;
+            
+        case AST_UNARY_OP:
+            if (str_equals_ignore_case(expr->unary.operator, "NOT") ||
+                str_equals_ignore_case(expr->unary.operator, "ΟΧΙ")) {
+                fprintf(gen->output, "!(");
+            } else {
+                fprintf(gen->output, "%s(", expr->unary.operator);
+            }
+            codegen_expression(gen, expr->unary.operand);
+            fprintf(gen->output, ")");
+            break;
+            
+        case AST_ARRAY_ACCESS:
+            fprintf(gen->output, "%s[", sanitize_identifier(expr->array_access.name));
+            for (int i = 0; i < expr->array_access.num_indices; i++) {
+                if (i > 0) fprintf(gen->output, "][");
+                codegen_expression(gen, expr->array_access.indices[i]);
+                // TODO: Add offset for custom bounds
+                fprintf(gen->output, " - 1");  // Assuming 1-based arrays for now
+            }
+            fprintf(gen->output, "]");
+            break;
+            
+        case AST_CALL:
+            fprintf(gen->output, "%s(", sanitize_identifier(expr->call.name));
+            for (int i = 0; i < expr->call.num_args; i++) {
+                if (i > 0) fprintf(gen->output, ", ");
+                codegen_expression(gen, expr->call.arguments[i]);
+            }
+            fprintf(gen->output, ")");
+            break;
+            
+        default:
+            fprintf(gen->output, "0");
+    }
+}
+
+// ============================================================================
+// STATEMENT GENERATION
+// ============================================================================
+
+void codegen_statement(CodeGenerator *gen, ASTNode *stmt) {
+    if (!stmt) return;
+    
+    
+    switch (stmt->type) {
+        case AST_ASSIGN: {
+            codegen_indent(gen);
+            
+            // Check if assigning to function return value
+            if (gen->in_function && gen->current_function_name &&
+                str_equals_ignore_case(stmt->assign.identifier, gen->current_function_name)) {
+                fprintf(gen->output, "%s_result = ", sanitize_identifier(gen->current_function_name));
+            } else {
+                if (stmt->assign.num_indices > 0) {
+                    // Array element assignment
+                    fprintf(gen->output, "%s[", sanitize_identifier(stmt->assign.identifier));
+                    for (int i = 0; i < stmt->assign.num_indices; i++) {
+                        if (i > 0) fprintf(gen->output, "][");
+                        codegen_expression(gen, stmt->assign.indices[i]);
+                        fprintf(gen->output, " - 1");  // Offset
+                    }
+                    fprintf(gen->output, "] = ");
+                } else {
+                    fprintf(gen->output, "%s = ", sanitize_identifier(stmt->assign.identifier));
+                }
+            }
+            
+            codegen_expression(gen, stmt->assign.value);
+            fprintf(gen->output, ";\n");
+            break;
+        }
+        
+    case AST_PRINT:
+    codegen_indent(gen);
+    fprintf(gen->output, "printf(\"");
+    
+    // First Pass: Build the format string
+    for (int i = 0; i < stmt->print.num_exprs; i++) {
+        ASTNode *expr = stmt->print.expressions[i];
+        
+        // CHECK: If it's the EOLN identifier, use %c
+        if (expr->type == AST_IDENTIFIER && str_equals_ignore_case(expr->identifier.name, "EOLN")) {
+            fprintf(gen->output, "%%c"); 
+        } 
+        else if (expr->type == AST_LITERAL) {
+            if (expr->literal.value.type == VAL_STRING) fprintf(gen->output, "%%s");
+            else if (expr->literal.value.type == VAL_INT) fprintf(gen->output, "%%d");
+            else if (expr->literal.value.type == VAL_REAL) fprintf(gen->output, "%%f");
+        } 
+        else {
+            fprintf(gen->output, "%%d"); // Default for variables like 'sum'
+        }
+    }
+    fprintf(gen->output, "\", ");
+
+    // Second Pass: Arguments
+    for (int i = 0; i < stmt->print.num_exprs; i++) {
+        if (i > 0) fprintf(gen->output, ", ");
+        codegen_expression(gen, stmt->print.expressions[i]);
+    }
+    fprintf(gen->output, ");\n");
+    break;
+
+
+        case AST_READ: {
+            for (int i = 0; i < stmt->read.num_vars; i++) {
+                ASTNode *var = stmt->read.variables[i];
+                codegen_indent(gen);
+                
+                if (var->type == AST_IDENTIFIER) {
+                    fprintf(gen->output, "scanf(\"%%d\", &%s);\n", 
+                           sanitize_identifier(var->identifier.name));
+                } else if (var->type == AST_ARRAY_ACCESS) {
+                    fprintf(gen->output, "scanf(\"%%d\", &%s[", 
+                           sanitize_identifier(var->array_access.name));
+                    for (int j = 0; j < var->array_access.num_indices; j++) {
+                        if (j > 0) fprintf(gen->output, "][");
+                        codegen_expression(gen, var->array_access.indices[j]);
+                        fprintf(gen->output, " - 1");
+                    }
+                    fprintf(gen->output, "]);\n");
+                }
+            }
+            break;
+        }
+        
+        case AST_IF: {
+            codegen_indent(gen);
+            fprintf(gen->output, "if (");
+            codegen_expression(gen, stmt->if_stmt.condition);
+            fprintf(gen->output, ") {\n");
+            
+            gen->indent_level++;
+            for (int i = 0; i < stmt->if_stmt.num_then; i++) {
+                codegen_statement(gen, stmt->if_stmt.then_branch[i]);
+            }
+            gen->indent_level--;
+            
+            if (stmt->if_stmt.else_branch && stmt->if_stmt.num_else > 0) {
+                codegen_indent(gen);
+                fprintf(gen->output, "} else {\n");
+                gen->indent_level++;
+                for (int i = 0; i < stmt->if_stmt.num_else; i++) {
+                    codegen_statement(gen, stmt->if_stmt.else_branch[i]);
+                }
+                gen->indent_level--;
+            }
+            
+            codegen_indent(gen);
+            fprintf(gen->output, "}\n");
+            break;
+        }
+        
+        case AST_FOR: {
+            codegen_indent(gen);
+            char *var = sanitize_identifier(stmt->for_loop.variable);
+            
+            fprintf(gen->output, "for (%s = ", var);
+            codegen_expression(gen, stmt->for_loop.start);
+            fprintf(gen->output, "; %s <= ", var);
+            codegen_expression(gen, stmt->for_loop.end);
+            fprintf(gen->output, "; %s += ", var);
+            codegen_expression(gen, stmt->for_loop.step);
+            fprintf(gen->output, ") {\n");
+            
+            gen->indent_level++;
+            for (int i = 0; i < stmt->for_loop.num_stmts; i++) {
+                codegen_statement(gen, stmt->for_loop.body[i]);
+            }
+            gen->indent_level--;
+            
+            codegen_indent(gen);
+            fprintf(gen->output, "}\n");
+            break;
+        }
+        
+        case AST_WHILE: {
+            if (stmt->while_loop.is_repeat_until) {
+                // REPEAT-UNTIL
+                codegen_indent(gen);
+                fprintf(gen->output, "do {\n");
+                
+                gen->indent_level++;
+                for (int i = 0; i < stmt->while_loop.num_stmts; i++) {
+                    codegen_statement(gen, stmt->while_loop.body[i]);
+                }
+                gen->indent_level--;
+                
+                codegen_indent(gen);
+                fprintf(gen->output, "} while (!(");
+                codegen_expression(gen, stmt->while_loop.condition);
+                fprintf(gen->output, "));\n");
+            } else {
+                // WHILE
+                codegen_indent(gen);
+                fprintf(gen->output, "while (");
+                codegen_expression(gen, stmt->while_loop.condition);
+                fprintf(gen->output, ") {\n");
+                
+                gen->indent_level++;
+                for (int i = 0; i < stmt->while_loop.num_stmts; i++) {
+                    codegen_statement(gen, stmt->while_loop.body[i]);
+                }
+                gen->indent_level--;
+                
+                codegen_indent(gen);
+                fprintf(gen->output, "}\n");
+            }
+            break;
+        }
+        
+        case AST_CALL: {
+            codegen_indent(gen);
+            fprintf(gen->output, "%s(", sanitize_identifier(stmt->call.name));
+            for (int i = 0; i < stmt->call.num_args; i++) {
+                if (i > 0) fprintf(gen->output, ", ");
+                // TODO: Handle & for pass-by-reference
+                codegen_expression(gen, stmt->call.arguments[i]);
+            }
+            fprintf(gen->output, ");\n");
+            break;
+        }
+        
+        default:
+            codegen_line(gen, "// Unknown statement type");
+    }
+}
+
+// ============================================================================
+// DECLARATION GENERATION
+// ============================================================================
+
+void codegen_declaration(CodeGenerator *gen, ASTNode *decl) {
+    if (decl->type == AST_CONST_DECL) {
+        codegen_indent(gen);
+        fprintf(gen->output, "#define %s ", sanitize_identifier(decl->decl.name));
+        codegen_expression(gen, decl->decl.value);
+        fprintf(gen->output, "\n");
+    } else if (decl->type == AST_VAR_DECL) {
+        codegen_indent(gen);
+        
+        if (decl->decl.num_arr_dims > 0) {
+            // Array declaration
+            fprintf(gen->output, "%s %s", 
+                   map_type(decl->decl.var_type),
+                   sanitize_identifier(decl->decl.name));
+            
+            for (int i = 0; i < decl->decl.num_arr_dims; i++) {
+                // Calculate size: end - start + 1
+                fprintf(gen->output, "[100]");  // TODO: Calculate from bounds
+            }
+            fprintf(gen->output, ";\n");
+        } else {
+            // Simple variable
+            fprintf(gen->output, "%s %s;\n", 
+                   map_type(decl->decl.var_type),
+                   sanitize_identifier(decl->decl.name));
+        }
+    }
+}
+
+// ============================================================================
+// FUNCTION/PROCEDURE GENERATION
+// ============================================================================
+
+void codegen_function(CodeGenerator *gen, ASTNode *func) {
+    fprintf(gen->output, "\n");
+    
+    // Return type
+    fprintf(gen->output, "%s %s(", 
+           map_type(func->subroutine.return_type),
+           sanitize_identifier(func->subroutine.name));
+    
+    // Parameters
+    for (int i = 0; i < func->subroutine.num_params; i++) {
+        if (i > 0) fprintf(gen->output, ", ");
+        ASTNode *param = func->subroutine.parameters[i];
+        
+        if (param->param.is_reference) {
+            fprintf(gen->output, "%s *%s", 
+                   map_type(param->param.param_type),
+                   sanitize_identifier(param->param.name));
+        } else {
+            fprintf(gen->output, "%s %s", 
+                   map_type(param->param.param_type),
+                   sanitize_identifier(param->param.name));
+        }
+    }
+    
+    fprintf(gen->output, ") {\n");
+    gen->indent_level++;
+    
+    // Return variable
+    codegen_indent(gen);
+    fprintf(gen->output, "%s %s_result = 0;\n", 
+           map_type(func->subroutine.return_type),
+           sanitize_identifier(func->subroutine.name));
+    
+    // Local variables
+    if (func->subroutine.local_decls) {
+        for (int i = 0; i < func->subroutine.num_local_decls; i++) {
+            codegen_declaration(gen, func->subroutine.local_decls[i]);
+        }
+    }
+    
+    // Body
+    gen->in_function = true;
+    gen->current_function_name = func->subroutine.name;
+    
+    for (int i = 0; i < func->subroutine.num_stmts; i++) {
+        codegen_statement(gen, func->subroutine.body[i]);
+    }
+    
+    gen->in_function = false;
+    
+    // Return
+    codegen_indent(gen);
+    fprintf(gen->output, "return %s_result;\n", 
+           sanitize_identifier(func->subroutine.name));
+    
+    gen->indent_level--;
+    fprintf(gen->output, "}\n");
+}
+
+void codegen_procedure(CodeGenerator *gen, ASTNode *proc) {
+    fprintf(gen->output, "\n");
+    
+    // Return type is void
+    fprintf(gen->output, "void %s(", sanitize_identifier(proc->subroutine.name));
+    
+    // Parameters
+    for (int i = 0; i < proc->subroutine.num_params; i++) {
+        if (i > 0) fprintf(gen->output, ", ");
+        ASTNode *param = proc->subroutine.parameters[i];
+        
+        if (param->param.is_reference) {
+            fprintf(gen->output, "%s *%s", 
+                   map_type(param->param.param_type),
+                   sanitize_identifier(param->param.name));
+        } else {
+            fprintf(gen->output, "%s %s", 
+                   map_type(param->param.param_type),
+                   sanitize_identifier(param->param.name));
+        }
+    }
+    
+    fprintf(gen->output, ") {\n");
+    gen->indent_level++;
+    
+    // Local variables
+    if (proc->subroutine.local_decls) {
+        for (int i = 0; i < proc->subroutine.num_local_decls; i++) {
+            codegen_declaration(gen, proc->subroutine.local_decls[i]);
+        }
+    }
+    
+    // Body
+    for (int i = 0; i < proc->subroutine.num_stmts; i++) {
+        codegen_statement(gen, proc->subroutine.body[i]);
+    }
+    
+    gen->indent_level--;
+    fprintf(gen->output, "}\n");
+}
+
+// ============================================================================
+// PROGRAM GENERATION
+// ============================================================================
+
+void codegen_program(CodeGenerator *gen, ASTNode *prog) {
+    // Header
+    fprintf(gen->output, "/*\n");
+    fprintf(gen->output, " * Generated C code from EAP pseudocode\n");
+    fprintf(gen->output, " * Program: %s\n", prog->program.name);
+    fprintf(gen->output, " */\n\n");
+    
+    // Includes
+    fprintf(gen->output, "#include <stdio.h>\n");
+    fprintf(gen->output, "#include <stdlib.h>\n");
+    fprintf(gen->output, "#include <stdbool.h>\n");
+    fprintf(gen->output, "#include <math.h>\n");
+    fprintf(gen->output, "#include <string.h>\n\n");
+    
+    // Constants and global variables
+    for (int i = 0; i < prog->program.num_decls; i++) {
+        ASTNode *decl = prog->program.declarations[i];
+        if (decl->type == AST_CONST_DECL) {
+            codegen_declaration(gen, decl);
+        }
+    }
+    
+    fprintf(gen->output, "\n");
+    
+    // Forward declarations for functions/procedures
+    for (int i = 0; i < prog->program.num_decls; i++) {
+        ASTNode *decl = prog->program.declarations[i];
+        if (decl->type == AST_FUNC_DECL) {
+            fprintf(gen->output, "%s %s(", 
+                   map_type(decl->subroutine.return_type),
+                   sanitize_identifier(decl->subroutine.name));
+            for (int j = 0; j < decl->subroutine.num_params; j++) {
+                if (j > 0) fprintf(gen->output, ", ");
+                ASTNode *param = decl->subroutine.parameters[j];
+                fprintf(gen->output, "%s%s", 
+                       map_type(param->param.param_type),
+                       param->param.is_reference ? "*" : "");
+            }
+            fprintf(gen->output, ");\n");
+        } else if (decl->type == AST_PROC_DECL) {
+            fprintf(gen->output, "void %s(", sanitize_identifier(decl->subroutine.name));
+            for (int j = 0; j < decl->subroutine.num_params; j++) {
+                if (j > 0) fprintf(gen->output, ", ");
+                ASTNode *param = decl->subroutine.parameters[j];
+                fprintf(gen->output, "%s%s", 
+                       map_type(param->param.param_type),
+                       param->param.is_reference ? "*" : "");
+            }
+            fprintf(gen->output, ");\n");
+        }
+    }
+    
+    // Global variables
+    fprintf(gen->output, "\n");
+    for (int i = 0; i < prog->program.num_decls; i++) {
+        ASTNode *decl = prog->program.declarations[i];
+        if (decl->type == AST_VAR_DECL) {
+            codegen_declaration(gen, decl);
+        }
+    }
+    
+    // Functions and procedures
+    for (int i = 0; i < prog->program.num_decls; i++) {
+        ASTNode *decl = prog->program.declarations[i];
+        if (decl->type == AST_FUNC_DECL) {
+            codegen_function(gen, decl);
+        } else if (decl->type == AST_PROC_DECL) {
+            codegen_procedure(gen, decl);
+        }
+    }
+    
+    // Main function
+    fprintf(gen->output, "\nint main() {\n");
+    gen->indent_level = 1;
+    
+    for (int i = 0; i < prog->program.num_stmts; i++) {
+        codegen_statement(gen, prog->program.body[i]);
+    }
+    
+    codegen_line(gen, "return 0;");
+    fprintf(gen->output, "}\n");
+}
+
+
+// Make these functions available to codegen.c
+bool str_equals_ignore_case(const char *a, const char *b); // Already exists
 
 int main(int argc, char **argv) {
     if (argc < 2) {
         printf("EAP Pseudocode Interpreter\n");
-        printf("Usage: %s <file.eap> [--debug]\n", argv[0]);
+        printf("Usage: %s <file.eap> [--debug|--transpile]\n", argv[0]);
         printf("\nExample:\n");
         printf("  %s program.eap\n", argv[0]);
-        printf("  %s program.eap --debug\n", argv[0]);
+        printf("  %s program.eap --debug --transpile\n", argv[0]);
         return 1;
     }
     
     const char *filename = argv[1];
+    bool transpile_mode = false;
+    
     debug_mode = (argc > 2 && strcmp(argv[2], "--debug") == 0);
+    
+    // Check for flags
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--debug") == 0) {
+            debug_mode = true;
+        } else if (strcmp(argv[i], "--transpile") == 0) {
+            transpile_mode = true;
+        }
+    }
+
     
     char *code = read_file(filename);
     
@@ -2819,7 +3449,15 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[DEBUG] Declarations: %d\n", program->program.num_decls);
         fprintf(stderr, "[DEBUG] Statements: %d\n", program->program.num_stmts);
     }
-    
+     
+    if (transpile_mode) {
+        CodeGenerator gen;
+        codegen_init(&gen, stdout);
+        codegen_program(&gen, program);
+        free(code);
+        return 0;
+    }
+        
     // Execute
     execute_program(program);
     
