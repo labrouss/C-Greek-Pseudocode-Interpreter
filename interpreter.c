@@ -3906,17 +3906,52 @@ void codegen_expression(CodeGenerator *gen, ASTNode *expr)
         }
         break;
 
-    case AST_IDENTIFIER:
-        if (str_equals_ignore_case(expr->identifier.name, "EOLN"))
+     case AST_IDENTIFIER:
         {
-            fprintf(gen->output, "'\\n'");
+            // Check if this identifier is a constant
+            bool is_constant = false;
+            RuntimeValue const_value;
+            
+            // Search through program constants
+            if (gen->program) {
+                for (int i = 0; i < gen->program->program.num_decls; i++) {
+                    ASTNode *decl = gen->program->program.declarations[i];
+                    if (decl->type == AST_CONST_DECL && 
+                        str_equals_ignore_case(decl->decl.name, expr->identifier.name)) {
+                        is_constant = true;
+                        // Evaluate the constant value
+                        const_value = evaluate(decl->decl.value, gen->env);
+                        break;
+                    }
+                }
+            }
+            
+            if (is_constant) {
+                // Output the constant's VALUE, not its name
+                switch (const_value.type) {
+                    case VAL_INT:
+                        fprintf(gen->output, "%d", const_value.value.int_val);
+                        break;
+                    case VAL_REAL:
+                        fprintf(gen->output, "%f", const_value.value.real_val);
+                        break;
+                    case VAL_BOOL:
+                        fprintf(gen->output, "%s", const_value.value.bool_val ? "true" : "false");
+                        break;
+                    default:
+                        // Fall back to sanitized name
+                        fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
+                        break;
+                }
+                free_runtime_value(&const_value);
+            } else {
+                // It's a regular variable - output sanitized name
+                fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
+            }
+            break;
         }
-        else
-        {
-            fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
-        }
-        break;
-
+        
+    
     case AST_BINARY_OP:
         fprintf(gen->output, "(");
         codegen_expression(gen, expr->binary.left);
