@@ -4167,12 +4167,24 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
     case AST_FOR:
     {
         codegen_indent(gen);
-        char *var = sanitize_identifier(stmt->for_loop.variable);
+        const char *var = sanitize_identifier(stmt->for_loop.variable);
+
+        // Check if step is positive or negative for correct comparison
+        bool is_positive_step = true;
+        if (stmt->for_loop.step->type == AST_LITERAL &&
+            stmt->for_loop.step->literal.value.type == VAL_INT)
+        {
+            is_positive_step = stmt->for_loop.step->literal.value.value.int_val >= 0;
+        }
 
         fprintf(gen->output, "for (%s = ", var);
         codegen_expression(gen, stmt->for_loop.start);
-        fprintf(gen->output, "; %s <= ", var);
+
+        // Use <= for positive step, >= for negative step
+        fprintf(gen->output, "; %s %s ", var, is_positive_step ? "<=" : ">=");
         codegen_expression(gen, stmt->for_loop.end);
+
+        // CRITICAL FIX: Use the loop variable, not the end expression
         fprintf(gen->output, "; %s += ", var);
         codegen_expression(gen, stmt->for_loop.step);
         fprintf(gen->output, ") {\n");
@@ -4281,57 +4293,67 @@ void codegen_declaration(CodeGenerator *gen, ASTNode *decl)
 
         if (decl->decl.num_arr_dims > 0)
         {
+            // Array declaration
             fprintf(gen->output, "%s %s", c_type, sanitize_identifier(decl->decl.name));
 
+            // Process each dimension and register bounds
             for (int i = 0; i < decl->decl.num_arr_dims; i++)
             {
                 ASTNode *start_expr = decl->decl.arr_bound_exprs[i].start_expr;
                 ASTNode *end_expr = decl->decl.arr_bound_exprs[i].end_expr;
 
-                int start = 1, end = 100;
+                int start = 1, end = 100; // defaults
 
+                // Try to evaluate the bounds
                 if (start_expr->type == AST_LITERAL && start_expr->literal.value.type == VAL_INT)
                 {
                     start = start_expr->literal.value.value.int_val;
                 }
+                else if (start_expr->type == AST_IDENTIFIER && gen->env)
+                {
+                    // Try to resolve constant
+                    RuntimeValue *val = env_get(gen->env, start_expr->identifier.name);
+                    if (val && val->type == VAL_INT)
+                    {
+                        start = val->value.int_val;
+                    }
+                }
+
                 if (end_expr->type == AST_LITERAL && end_expr->literal.value.type == VAL_INT)
                 {
                     end = end_expr->literal.value.value.int_val;
                 }
-                else if (start_expr->type == AST_IDENTIFIER)
+                else if (end_expr->type == AST_IDENTIFIER && gen->env)
                 {
                     // Try to resolve constant
-                    if (gen->env)
+                    RuntimeValue *val = env_get(gen->env, end_expr->identifier.name);
+                    if (val && val->type == VAL_INT)
                     {
-                        RuntimeValue *val = env_get(gen->env, start_expr->identifier.name);
-                        if (val && val->type == VAL_INT)
-                        {
-                            start = val->value.int_val;
-                        }
-                    }
-                }
-                if (end_expr->type == AST_IDENTIFIER)
-                {
-                    if (gen->env)
-                    {
-                        RuntimeValue *val = env_get(gen->env, end_expr->identifier.name);
-                        if (val && val->type == VAL_INT)
-                        {
-                            end = val->value.int_val;
-                        }
+                        end = val->value.int_val;
                     }
                 }
 
                 int size = end - start + 1;
                 fprintf(gen->output, "[%d]", size);
 
-                // Register bounds
+                // CRITICAL: Register bounds for THIS dimension
                 codegen_register_array(gen, decl->decl.name, start, end, i);
             }
-            fprintf(gen->output, ";\n");
+
+            fprintf(gen->output, "; /* bounds: ");
+            for (int i = 0; i < decl->decl.num_arr_dims; i++)
+            {
+                if (i > 0)
+                    fprintf(gen->output, ", ");
+                int start = codegen_get_array_offset(gen, decl->decl.name, i);
+                int size = codegen_get_array_size(gen, decl->decl.name, i);
+                fprintf(gen->output, "[%d..%d]", start, start + size - 1);
+            }
+            fprintf(gen->output, " */\n");
         }
         else
         {
+            // Simple variable
             fprintf(gen->output, "%s %s;\n", c_type, sanitize_identifier(decl->decl.name));
         }
     }
@@ -4462,7 +4484,6 @@ void codegen_procedure(CodeGenerator *gen, ASTNode *proc)
 // ============================================================================
 // PROGRAM GENERATION
 // ============================================================================
-
 void codegen_program(CodeGenerator *gen, ASTNode *prog)
 {
     // Store program for lookups
@@ -4481,12 +4502,18 @@ void codegen_program(CodeGenerator *gen, ASTNode *prog)
     fprintf(gen->output, "#include <math.h>\n");
     fprintf(gen->output, "#include <string.h>\n\n");
 
-    // Constants and global variables
+    // Create environment for constant evaluation
+    Environment *const_env = create_environment(NULL);
+    gen->env = const_env;
+
+    // First pass: Constants (and evaluate them)
     for (int i = 0; i < prog->program.num_decls; i++)
     {
         ASTNode *decl = prog->program.declarations[i];
         if (decl->type == AST_CONST_DECL)
         {
+            RuntimeValue val = evaluate(decl->decl.value, const_env);
+            env_define(const_env, decl->decl.name, val);
             codegen_declaration(gen, decl);
         }
     }
