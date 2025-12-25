@@ -4169,7 +4169,6 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
         codegen_indent(gen);
         const char *var = sanitize_identifier(stmt->for_loop.variable);
 
-        // Check if step is positive or negative for correct comparison
         bool is_positive_step = true;
         if (stmt->for_loop.step->type == AST_LITERAL &&
             stmt->for_loop.step->literal.value.type == VAL_INT)
@@ -4180,12 +4179,10 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
         fprintf(gen->output, "for (%s = ", var);
         codegen_expression(gen, stmt->for_loop.start);
 
-        // Use <= for positive step, >= for negative step
         fprintf(gen->output, "; %s %s ", var, is_positive_step ? "<=" : ">=");
         codegen_expression(gen, stmt->for_loop.end);
-
-        // CRITICAL FIX: Use the loop variable, not the end expression
-        fprintf(gen->output, "; %s += ", var);
+        
+        fprintf(gen->output, "; %s += ", var); 
         codegen_expression(gen, stmt->for_loop.step);
         fprintf(gen->output, ") {\n");
 
