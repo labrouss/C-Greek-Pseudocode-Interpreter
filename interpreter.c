@@ -211,7 +211,8 @@ typedef struct
     bool in_function;
     char *current_function_name;
     Environment *env;
-    ASTNode *program; // Store program AST for lookups
+    ASTNode *program;            // Store program AST for lookups
+    ASTNode *current_subroutine; // ✅ ADD THIS - Track current function/procedure
 
     // Array bounds tracking
     ArrayBoundsInfo array_bounds[100];
@@ -2349,7 +2350,7 @@ static ASTNode *parse_program()
                 }
                 else
                 {
-                    var_decl->decl.var_type = base_type;
+                    var_decl->decl.var_type = strdup(base_type);
                     var_decl->decl.num_arr_dims = 0;
                 }
 
@@ -2362,10 +2363,10 @@ static ASTNode *parse_program()
             }
 
             free(names);
-            if (!is_array)
-            {
-                free(base_type);
-            }
+            // if (!is_array)
+            //{
+            free(base_type);
+            //}
         }
     }
 
@@ -3621,30 +3622,27 @@ const char *map_type(const char *eap_type)
     if (!eap_type)
         return "int";
 
-    // Use a more robust check for Greek characters
-    if (str_equals_ignore_case(eap_type, "ΑΚΕΡΑΙΟΣ") ||
-        str_equals_ignore_case(eap_type, "INTEGER"))
-    {
+    if (str_equals_ignore_case(eap_type, "INTEGER") ||
+        str_equals_ignore_case(eap_type, "ΑΚΕΡΑΙΟΣ"))
         return "int";
-    }
-    if (str_equals_ignore_case(eap_type, "ΠΡΑΓΜΑΤΙΚΟΣ") ||
-        str_equals_ignore_case(eap_type, "REAL"))
-    {
-        return "double";
-    }
-    if (str_equals_ignore_case(eap_type, "ΛΟΓΙΚΟΣ") ||
-        str_equals_ignore_case(eap_type, "BOOLEAN"))
-    {
-        return "bool";
-    }
-    if (str_equals_ignore_case(eap_type, "ΧΑΡΑΚΤΗΡΑΣ") ||
-        str_equals_ignore_case(eap_type, "CHAR"))
-    {
-        return "char";
-    }
 
-    // Default to int instead of void to avoid "void sum;" errors
-    return "int";
+    if (str_equals_ignore_case(eap_type, "REAL") ||
+        str_equals_ignore_case(eap_type, "ΠΡΑΓΜΑΤΙΚΟΣ"))
+        return "double";
+
+    if (str_equals_ignore_case(eap_type, "BOOLEAN") ||
+        str_equals_ignore_case(eap_type, "ΛΟΓΙΚΟΣ"))
+        return "bool";
+
+    if (str_equals_ignore_case(eap_type, "STRING") ||
+        str_equals_ignore_case(eap_type, "ΣΥΜΒΟΛΟΣΕΙΡΑ"))
+        return "char*";
+
+    if (str_equals_ignore_case(eap_type, "CHAR") ||
+        str_equals_ignore_case(eap_type, "ΧΑΡΑΚΤΗΡΑΣ"))
+        return "char";
+
+    return "int"; // default fallback
 }
 
 // ============================================================================
@@ -3845,9 +3843,11 @@ void codegen_init(CodeGenerator *gen, FILE *out)
     gen->current_function_name = NULL;
     gen->env = NULL;
     gen->program = NULL;
+    gen->current_subroutine = NULL;
     gen->num_arrays = 0;
     gen->num_vars = 0;
 }
+
 void codegen_indent(CodeGenerator *gen)
 {
     for (int i = 0; i < gen->indent_level; i++)
@@ -3906,52 +3906,87 @@ void codegen_expression(CodeGenerator *gen, ASTNode *expr)
         }
         break;
 
-     case AST_IDENTIFIER:
+    case AST_IDENTIFIER:
+    {
+        if (str_equals_ignore_case(expr->identifier.name, "EOLN"))
         {
-            // Check if this identifier is a constant
-            bool is_constant = false;
-            RuntimeValue const_value;
-            
-            // Search through program constants
-            if (gen->program) {
-                for (int i = 0; i < gen->program->program.num_decls; i++) {
-                    ASTNode *decl = gen->program->program.declarations[i];
-                    if (decl->type == AST_CONST_DECL && 
-                        str_equals_ignore_case(decl->decl.name, expr->identifier.name)) {
-                        is_constant = true;
-                        // Evaluate the constant value
-                        const_value = evaluate(decl->decl.value, gen->env);
+            fprintf(gen->output, "'\\n'");
+            break;
+        }
+
+        // Check if this identifier is a constant
+        bool is_constant = false;
+        RuntimeValue const_value;
+
+        // Search through program constants
+        if (gen->program)
+        {
+            for (int i = 0; i < gen->program->program.num_decls; i++)
+            {
+                ASTNode *decl = gen->program->program.declarations[i];
+                if (decl->type == AST_CONST_DECL &&
+                    str_equals_ignore_case(decl->decl.name, expr->identifier.name))
+                {
+                    is_constant = true;
+                    // Evaluate the constant value
+                    const_value = evaluate(decl->decl.value, gen->env);
+                    break;
+                }
+            }
+        }
+
+        if (is_constant)
+        {
+            // Output the constant's VALUE, not its name
+            switch (const_value.type)
+            {
+            case VAL_INT:
+                fprintf(gen->output, "%d", const_value.value.int_val);
+                break;
+            case VAL_REAL:
+                fprintf(gen->output, "%f", const_value.value.real_val);
+                break;
+            case VAL_BOOL:
+                fprintf(gen->output, "%s", const_value.value.bool_val ? "true" : "false");
+                break;
+            default:
+                // Fall back to sanitized name
+                fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
+                break;
+            }
+            free_runtime_value(&const_value);
+        }
+        else
+        {
+            // Check if this is a reference parameter that needs dereferencing
+            bool is_ref_param = false;
+            if (gen->current_subroutine)
+            {
+                for (int i = 0; i < gen->current_subroutine->subroutine.num_params; i++)
+                {
+                    ASTNode *param = gen->current_subroutine->subroutine.parameters[i];
+                    if (str_equals_ignore_case(param->param.name, expr->identifier.name) &&
+                        param->param.is_reference)
+                    {
+                        is_ref_param = true;
                         break;
                     }
                 }
             }
-            
-            if (is_constant) {
-                // Output the constant's VALUE, not its name
-                switch (const_value.type) {
-                    case VAL_INT:
-                        fprintf(gen->output, "%d", const_value.value.int_val);
-                        break;
-                    case VAL_REAL:
-                        fprintf(gen->output, "%f", const_value.value.real_val);
-                        break;
-                    case VAL_BOOL:
-                        fprintf(gen->output, "%s", const_value.value.bool_val ? "true" : "false");
-                        break;
-                    default:
-                        // Fall back to sanitized name
-                        fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
-                        break;
-                }
-                free_runtime_value(&const_value);
-            } else {
-                // It's a regular variable - output sanitized name
+
+            // Dereference if it's a pointer parameter
+            if (is_ref_param)
+            {
+                fprintf(gen->output, "(*%s)", sanitize_identifier(expr->identifier.name));
+            }
+            else
+            {
                 fprintf(gen->output, "%s", sanitize_identifier(expr->identifier.name));
             }
-            break;
         }
-        
-    
+        break;
+    }
+
     case AST_BINARY_OP:
         fprintf(gen->output, "(");
         codegen_expression(gen, expr->binary.left);
@@ -4073,6 +4108,24 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
             if (stmt->assign.num_indices > 0)
             {
                 // Array element assignment
+
+                // First check if the array itself is a pointer parameter
+                bool is_ref_param = false;
+                if (gen->current_subroutine)
+                {
+                    for (int i = 0; i < gen->current_subroutine->subroutine.num_params; i++)
+                    {
+                        ASTNode *param = gen->current_subroutine->subroutine.parameters[i];
+                        if (str_equals_ignore_case(param->param.name, stmt->assign.identifier) &&
+                            param->param.is_reference)
+                        {
+                            is_ref_param = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Generate array access
                 fprintf(gen->output, "%s[", sanitize_identifier(stmt->assign.identifier));
                 for (int i = 0; i < stmt->assign.num_indices; i++)
                 {
@@ -4096,7 +4149,33 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
             }
             else
             {
-                fprintf(gen->output, "%s = ", sanitize_identifier(stmt->assign.identifier));
+                // Simple variable assignment
+
+                // Check if this variable is a reference (pointer) parameter
+                bool is_ref_param = false;
+                if (gen->current_subroutine)
+                {
+                    for (int i = 0; i < gen->current_subroutine->subroutine.num_params; i++)
+                    {
+                        ASTNode *param = gen->current_subroutine->subroutine.parameters[i];
+                        if (str_equals_ignore_case(param->param.name, stmt->assign.identifier) &&
+                            param->param.is_reference)
+                        {
+                            is_ref_param = true;
+                            break;
+                        }
+                    }
+                }
+
+                // If it's a reference parameter, dereference it
+                if (is_ref_param)
+                {
+                    fprintf(gen->output, "*%s = ", sanitize_identifier(stmt->assign.identifier));
+                }
+                else
+                {
+                    fprintf(gen->output, "%s = ", sanitize_identifier(stmt->assign.identifier));
+                }
             }
         }
 
@@ -4216,8 +4295,8 @@ void codegen_statement(CodeGenerator *gen, ASTNode *stmt)
 
         fprintf(gen->output, "; %s %s ", var, is_positive_step ? "<=" : ">=");
         codegen_expression(gen, stmt->for_loop.end);
-        
-        fprintf(gen->output, "; %s += ", var); 
+
+        fprintf(gen->output, "; %s += ", var);
         codegen_expression(gen, stmt->for_loop.step);
         fprintf(gen->output, ") {\n");
 
@@ -4311,65 +4390,30 @@ void codegen_declaration(CodeGenerator *gen, ASTNode *decl)
 {
     if (decl->type == AST_CONST_DECL)
     {
-        codegen_indent(gen);
-        fprintf(gen->output, "#define %s ", sanitize_identifier(decl->decl.name));
-        codegen_expression(gen, decl->decl.value);
-        fprintf(gen->output, "\n");
+        // Don't generate #define for constants since we inline them
+        return;
     }
-    else if (decl->type == AST_VAR_DECL)
-    {
-        const char *c_type = map_type(decl->decl.var_type);
-        codegen_register_var_type(gen, decl->decl.name, c_type);
 
+    if (decl->type == AST_VAR_DECL)
+    {
         codegen_indent(gen);
 
         if (decl->decl.num_arr_dims > 0)
         {
             // Array declaration
-            fprintf(gen->output, "%s %s", c_type, sanitize_identifier(decl->decl.name));
+            const char *elem_type = map_type(decl->decl.var_type);
+            fprintf(gen->output, "%s %s", elem_type, sanitize_identifier(decl->decl.name));
 
-            // Process each dimension and register bounds
+            // Dimensions
             for (int i = 0; i < decl->decl.num_arr_dims; i++)
             {
-                ASTNode *start_expr = decl->decl.arr_bound_exprs[i].start_expr;
-                ASTNode *end_expr = decl->decl.arr_bound_exprs[i].end_expr;
-
-                int start = 1, end = 100; // defaults
-
-                // Try to evaluate the bounds
-                if (start_expr->type == AST_LITERAL && start_expr->literal.value.type == VAL_INT)
-                {
-                    start = start_expr->literal.value.value.int_val;
-                }
-                else if (start_expr->type == AST_IDENTIFIER && gen->env)
-                {
-                    // Try to resolve constant
-                    RuntimeValue *val = env_get(gen->env, start_expr->identifier.name);
-                    if (val && val->type == VAL_INT)
-                    {
-                        start = val->value.int_val;
-                    }
-                }
-
-                if (end_expr->type == AST_LITERAL && end_expr->literal.value.type == VAL_INT)
-                {
-                    end = end_expr->literal.value.value.int_val;
-                }
-                else if (end_expr->type == AST_IDENTIFIER && gen->env)
-                {
-                    // Try to resolve constant
-                    RuntimeValue *val = env_get(gen->env, end_expr->identifier.name);
-                    if (val && val->type == VAL_INT)
-                    {
-                        end = val->value.int_val;
-                    }
-                }
-
-                int size = end - start + 1;
+                // Calculate size from bounds
+                RuntimeValue start = evaluate(decl->decl.arr_bound_exprs[i].start_expr, gen->env);
+                RuntimeValue end = evaluate(decl->decl.arr_bound_exprs[i].end_expr, gen->env);
+                int size = to_int(&end) - to_int(&start) + 1;
                 fprintf(gen->output, "[%d]", size);
-
-                // CRITICAL: Register bounds for THIS dimension
-                codegen_register_array(gen, decl->decl.name, start, end, i);
+                free_runtime_value(&start);
+                free_runtime_value(&end);
             }
 
             fprintf(gen->output, "; /* bounds: ");
@@ -4377,15 +4421,18 @@ void codegen_declaration(CodeGenerator *gen, ASTNode *decl)
             {
                 if (i > 0)
                     fprintf(gen->output, ", ");
-                int start = codegen_get_array_offset(gen, decl->decl.name, i);
-                int size = codegen_get_array_size(gen, decl->decl.name, i);
-                fprintf(gen->output, "[%d..%d]", start, start + size - 1);
+                fprintf(gen->output, "[");
+                codegen_expression(gen, decl->decl.arr_bound_exprs[i].start_expr);
+                fprintf(gen->output, "..");
+                codegen_expression(gen, decl->decl.arr_bound_exprs[i].end_expr);
+                fprintf(gen->output, "]");
             }
             fprintf(gen->output, " */\n");
         }
         else
         {
-            // Simple variable
+            // Simple variable - USE THE TYPE!
+            const char *c_type = map_type(decl->decl.var_type);
             fprintf(gen->output, "%s %s;\n", c_type, sanitize_identifier(decl->decl.name));
         }
     }
@@ -4399,10 +4446,14 @@ void codegen_function(CodeGenerator *gen, ASTNode *func)
 {
     fprintf(gen->output, "\n");
 
+    gen->current_subroutine = func;
+
     // Return type
     fprintf(gen->output, "%s %s(",
             map_type(func->subroutine.return_type),
             sanitize_identifier(func->subroutine.name));
+
+    codegen_register_var_type(gen, func->subroutine.name, map_type(func->subroutine.return_type));
 
     // Parameters
     for (int i = 0; i < func->subroutine.num_params; i++)
@@ -4467,8 +4518,11 @@ void codegen_procedure(CodeGenerator *gen, ASTNode *proc)
 {
     fprintf(gen->output, "\n");
 
+    gen->current_subroutine = proc;
+
     // Return type is void
     fprintf(gen->output, "void %s(", sanitize_identifier(proc->subroutine.name));
+    codegen_register_var_type(gen, proc->subroutine.name, map_type(proc->subroutine.return_type));
 
     // Parameters
     for (int i = 0; i < proc->subroutine.num_params; i++)
@@ -4508,7 +4562,7 @@ void codegen_procedure(CodeGenerator *gen, ASTNode *proc)
     {
         codegen_statement(gen, proc->subroutine.body[i]);
     }
-
+    gen->current_subroutine = NULL;
     gen->indent_level--;
     fprintf(gen->output, "}\n");
 }
@@ -4533,6 +4587,8 @@ void codegen_program(CodeGenerator *gen, ASTNode *prog)
     fprintf(gen->output, "#include <stdbool.h>\n");
     fprintf(gen->output, "#include <math.h>\n");
     fprintf(gen->output, "#include <string.h>\n\n");
+
+    // fprintf(gen->output, "#define EOLN '\\n'\n");
 
     // Create environment for constant evaluation
     Environment *const_env = create_environment(NULL);
@@ -4588,7 +4644,17 @@ void codegen_program(CodeGenerator *gen, ASTNode *prog)
         }
     }
 
-    // Global variables
+    for (int i = 0; i < prog->program.num_decls; i++)
+    {
+        ASTNode *decl = prog->program.declarations[i];
+        if (decl->type == AST_VAR_DECL)
+        {
+            const char *c_type = map_type(decl->decl.var_type);
+            codegen_register_var_type(gen, decl->decl.name, c_type);
+        }
+    }
+
+    // NOW generate the declarations
     fprintf(gen->output, "\n");
     for (int i = 0; i < prog->program.num_decls; i++)
     {
@@ -4598,7 +4664,7 @@ void codegen_program(CodeGenerator *gen, ASTNode *prog)
             codegen_declaration(gen, decl);
         }
     }
-
+    
     // Functions and procedures
     for (int i = 0; i < prog->program.num_decls; i++)
     {
